@@ -105,7 +105,7 @@ If `wiki.config.md` has `private: true`, the loop refuses any non-local fetcher 
 
 ## Reactive trigger (Phase 3.3.4)
 
-`scripts/file-watcher.js` watches `wiki/<slug>/wiki/**/*.md`. On user-edited claim, enqueues a verification seed (`verify: <claim>`) at depth 0. Wired through pro-workflow's `file-watcher.js` hook.
+Not shipped yet: a reactive file-watcher trigger (re-verify user-edited claims) is planned; there is no `scripts/file-watcher.js` today.
 
 ## Cron tick (Phase 3.3.4)
 

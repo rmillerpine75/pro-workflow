@@ -11,8 +11,8 @@ const PROVIDERS = {
   anthropic: {
     envKey: 'ANTHROPIC_API_KEY',
     baseUrl: 'https://api.anthropic.com',
-    defaultModels: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-    defaultChairman: 'claude-opus-4-7',
+    defaultModels: ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+    defaultChairman: 'claude-opus-5-5',
     call: callAnthropic,
   },
   openai: {
@@ -57,7 +57,7 @@ function pickProvider(arg) {
   return null;
 }
 
-function postJSON(urlStr, body, headers, timeoutMs = 120000) {
+function postJSON(urlStr, body, headers, timeoutMs = 600000) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
     const data = JSON.stringify(body);
@@ -98,9 +98,10 @@ async function callOpenAICompat(provider, model, system, user) {
 async function callAnthropic(provider, model, system, user) {
   const start = Date.now();
   const url = `${provider.baseUrl}/v1/messages`;
+  // Adaptive thinking is on by default on current models and counts toward max_tokens.
   const res = await postJSON(url, {
     model,
-    max_tokens: 4000,
+    max_tokens: 16000,
     system,
     messages: [{ role: 'user', content: user }],
   }, {
@@ -112,6 +113,9 @@ async function callAnthropic(provider, model, system, user) {
   let data;
   try { data = JSON.parse(res.body); } catch { return { success: false, content: '[parse-error]', model, latency_ms: elapsed }; }
   const content = (data.content || []).map(b => b.text || '').join('');
+  if (data.stop_reason === 'refusal' || data.stop_reason === 'max_tokens') {
+    return { success: false, content: `[stopped: ${data.stop_reason}] ${content}`, model, latency_ms: elapsed, tokens: data.usage || {} };
+  }
   return { success: true, content, model, latency_ms: elapsed, tokens: data.usage || {} };
 }
 
@@ -181,7 +185,7 @@ async function cmdRun(args) {
   }
 
   // Phase 1
-  const sysIndep = 'You are participating in an LLM council deliberation. Provide your best, most thoughtful response to the query. Be comprehensive but focused.';
+  const sysIndep = 'You are one of several models answering the same query independently; a chairman will combine the answers into one recommendation. State your reasoning and any assumptions so the chairman can weigh them.';
   const phase1Settled = await Promise.allSettled(models.map(m => provider.call(provider, m, sysIndep, query)));
   const phase1Entries = phase1Settled.map((s, i) => settledToEntry(models[i], s));
   const phase1 = Object.fromEntries(models.map((m, i) => [m, phase1Entries[i]]));
@@ -205,6 +209,11 @@ async function cmdRun(args) {
   const userSynth = `ORIGINAL QUERY:\n${query}\n\nINDIVIDUAL RESPONSES:\n${responsesText}\n\nMODEL RANKINGS:\n${rankingsText}\n\nProduce the FINAL SYNTHESIS:`;
   const synth = await provider.call(provider, chairman, sysSynth, userSynth);
   fs.writeFileSync(path.join(sessionDir, 'phase3_synthesis.txt'), synth.content);
+  if (!synth.success) {
+    // Refusal, max_tokens cutoff or API error on the chairman call: don't present it as a finished synthesis.
+    console.error(`chairman synthesis failed: ${synth.content.slice(0, 200)}`);
+    process.exitCode = 1;
+  }
 
   // Render
   const out = [];

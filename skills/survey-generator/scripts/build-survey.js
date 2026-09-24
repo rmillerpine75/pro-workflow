@@ -29,7 +29,7 @@ function getStore() {
   return require(distPath).createStore();
 }
 
-function postJSON(urlStr, body, headers, timeoutMs = 180000) {
+function postJSON(urlStr, body, headers, timeoutMs = 600000) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
     const data = JSON.stringify(body);
@@ -51,7 +51,7 @@ function postJSON(urlStr, body, headers, timeoutMs = 180000) {
 }
 
 const PROVIDER_DEFAULTS = {
-  anthropic: { envKey: 'ANTHROPIC_API_KEY', baseUrl: 'https://api.anthropic.com', model: 'claude-opus-4-7' },
+  anthropic: { envKey: 'ANTHROPIC_API_KEY', baseUrl: 'https://api.anthropic.com', model: 'claude-opus-5-5' },
   openai: { envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
   openrouter: { envKey: 'OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-opus-4' },
   fireworks: { envKey: 'FIREWORKS_API_KEY', baseUrl: 'https://api.fireworks.ai/inference/v1', model: 'accounts/fireworks/models/kimi-k2p5' },
@@ -73,6 +73,8 @@ async function callProvider(providerName, model, system, user, maxTokens) {
     }, { 'x-api-key': process.env[p.envKey], 'anthropic-version': '2023-06-01' });
     if (res.status >= 400) die(`anthropic error ${res.status}: ${res.body.slice(0, 300)}`);
     const data = JSON.parse(res.body);
+    if (data.stop_reason === 'max_tokens') die(`anthropic output hit max_tokens (${maxTokens}); survey would be truncated`);
+    if (data.stop_reason === 'refusal') die('anthropic refused the request');
     return (data.content || []).map(b => b.text || '').join('');
   }
   const res = await postJSON(`${p.baseUrl}/chat/completions`, {
@@ -134,31 +136,27 @@ function buildPrompt(bundle) {
     ...s,
     paper_citation_ids: (s.papers || []).map(k => bibCitationId(k)),
   }));
-  return `Compile a literature survey on the topic "${bundle.topic}" using ONLY the bibliography provided.
+  return `Compile a literature survey on the topic "${bundle.topic}" using only the papers in the bibliography below.
 
-Output strict markdown:
-- H1 = topic title
+Output markdown:
+- H1 = topic title, followed directly by the first section (no prose under the H1)
 - Numbered H2 sections following the provided sections list
-- Inline citations as [^citation_id] using the EXACT citation_id from the bibliography below (e.g., [^src-bib-park-2023-generative-agents])
+- Inline citations as [^citation_id], copying the citation_id field exactly (e.g., [^src-bib-park-2023-generative-agents]) - downstream tooling links these ids to rows in sources.md
 - A "## References" section at the end listing every cited [^citation_id] with: citation_id, authors, year, title, venue, one-sentence summary
 - No HTML, no SVG, no inline images
 - ~600-1200 words per section, scaled by bibliography size
-- For each section, weave together the papers in section.paper_citation_ids; do not just list them
+- In each section, cite every paper in its paper_citation_ids at least once, and weave them together rather than listing them
 
-Bibliography (USE THE citation_id FIELD EXACTLY for inline citations):
+Bibliography:
 ${JSON.stringify(bibWithIds, null, 2)}
 
-Sections to produce in order (use paper_citation_ids for citations):
+Sections to produce in order:
 ${JSON.stringify(sectionsWithIds, null, 2)}
 
 Anchor (context only, do not cite):
 ${bundle.anchor_source || ''}
 
-Hard rules:
-- Cite real papers from the bibliography only. Do not invent.
-- Every section that lists papers MUST cite each one at least once via its citation_id.
-- Use [^citation_id] for inline citations. The References section reuses these citation_id values.
-- Do not write any prose under the H1; start sections immediately.`;
+Cite only works listed in the bibliography; do not add papers that are not there.`;
 }
 
 async function cmdRun(args) {
