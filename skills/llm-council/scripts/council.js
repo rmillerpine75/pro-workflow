@@ -185,12 +185,24 @@ async function cmdRun(args) {
     return { success: false, content: `[ERROR: ${settled.reason?.message || settled.reason}]`, model, latency_ms: 0 };
   }
 
+  // A truncated, refused or failed answer would otherwise be ranked and synthesized as if it were
+  // complete. Stop the run instead; the raw responses stay in the session dir for diagnosis.
+  function stopIfIncomplete(phase, entriesByModel) {
+    const bad = Object.entries(entriesByModel).filter(([, e]) => !e.success);
+    if (!bad.length) return false;
+    for (const [m, e] of bad) console.error(`[council] ${phase}: ${m} incomplete: ${String(e.content).slice(0, 200)}`);
+    console.error(`[council] stopped after ${phase}; raw responses saved in ${sessionDir}`);
+    process.exitCode = 1;
+    return true;
+  }
+
   // Phase 1
   const sysIndep = 'You are one of several models answering the same query independently; a chairman will combine the answers into one recommendation. State your reasoning and any assumptions so the chairman can weigh them.';
   const phase1Settled = await Promise.allSettled(models.map(m => provider.call(provider, m, sysIndep, query)));
   const phase1Entries = phase1Settled.map((s, i) => settledToEntry(models[i], s));
   const phase1 = Object.fromEntries(models.map((m, i) => [m, phase1Entries[i]]));
   fs.writeFileSync(path.join(sessionDir, 'phase1_responses.json'), JSON.stringify(phase1, null, 2));
+  if (stopIfIncomplete('phase 1', phase1)) return;
 
   // Phase 2
   const labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G'].slice(0, models.length);
@@ -202,6 +214,7 @@ async function cmdRun(args) {
   const phase2Entries = phase2Settled.map((s, i) => settledToEntry(models[i], s));
   const phase2 = { label_of: labelOf, rankings: Object.fromEntries(models.map((m, i) => [m, phase2Entries[i]])) };
   fs.writeFileSync(path.join(sessionDir, 'phase2_rankings.json'), JSON.stringify(phase2, null, 2));
+  if (stopIfIncomplete('phase 2', phase2.rankings)) return;
 
   // Phase 3
   const responsesText = models.map(m => `=== ${labelOf[m]}: ${m} ===\n${phase1[m].content}`).join('\n\n');
@@ -238,14 +251,21 @@ async function cmdRun(args) {
     out.push(phase2.rankings[m].content);
     out.push('');
   }
-  out.push('## Phase 3 — Chairman synthesis');
-  out.push(`### ${chairman}`);
-  out.push(synth.content);
+  if (synth.success) {
+    out.push('## Phase 3 — Chairman synthesis');
+    out.push(`### ${chairman}`);
+    out.push(synth.content);
+  } else {
+    out.push('## Phase 3 — Chairman synthesis FAILED');
+    out.push(`The chairman call (${chairman}) did not complete, so there is no synthesis. Diagnostic output: phase3_synthesis.txt in the session directory.`);
+  }
 
   const md = out.join('\n');
   fs.writeFileSync(path.join(sessionDir, 'final_output.md'), md);
 
-  if (args.wiki) {
+  if (args.wiki && !synth.success) {
+    console.error('[council] synthesis failed; not persisting to wiki');
+  } else if (args.wiki) {
     const wikiPath = persistToWiki(args.wiki, sessionId, md);
     if (wikiPath) console.error(`[council] persisted to ${wikiPath}`);
     else console.error(`[council] wiki ${args.wiki} not found, skipping persist`);
