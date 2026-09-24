@@ -77,7 +77,7 @@ function postAnthropicStream(urlStr, body, headers, idleTimeoutMs = 600000) {
         res.on('end', () => finish({ status: res.statusCode, body: errBody }));
         return;
       }
-      const out = { status: res.statusCode, body: '', text: '', stop_reason: null, usage: {}, error: null };
+      const out = { status: res.statusCode, body: '', text: '', stop_reason: null, usage: {}, error: null, stopped: false };
       let buf = '';
       res.on('data', c => { buf = consumeSSE(buf + c, ev => applyStreamEvent(out, ev)); });
       res.on('end', () => { consumeSSE(buf + '\n\n', ev => applyStreamEvent(out, ev)); finish(out); });
@@ -106,7 +106,8 @@ function applyStreamEvent(out, ev) {
   else if (ev.type === 'message_delta') {
     if (ev.delta && ev.delta.stop_reason) out.stop_reason = ev.delta.stop_reason;
     if (ev.usage) out.usage = ev.usage;
-  } else if (ev.type === 'error') out.error = ev.error || ev;
+  } else if (ev.type === 'message_stop') out.stopped = true;
+  else if (ev.type === 'error') out.error = ev.error || ev;
 }
 
 const PROVIDER_DEFAULTS = {
@@ -136,6 +137,7 @@ async function callProvider(providerName, model, system, user, maxTokens) {
     if (res.stop_reason === 'refusal') die('anthropic refused the request');
     // Only end_turn is a complete survey; max_tokens, model_context_window_exceeded or a dropped
     // stream (null) would write a truncated file.
+    if (!res.stopped) die('anthropic stream ended without message_stop; survey would be incomplete');
     if (res.stop_reason !== 'end_turn') die(`anthropic stopped with ${res.stop_reason} (max_tokens ${maxTokens}); survey would be truncated`);
     return res.text;
   }

@@ -92,6 +92,10 @@ async function callOpenAICompat(provider, model, system, user) {
   let data;
   try { data = JSON.parse(res.body); } catch (e) { return { success: false, content: `[parse-error]`, model, latency_ms: elapsed }; }
   const content = data.choices?.[0]?.message?.content || '';
+  const finish = data.choices?.[0]?.finish_reason;
+  if (finish === 'length' || finish === 'content_filter') {
+    return { success: false, content: `[stopped: ${finish}] ${content}`, model, latency_ms: elapsed, tokens: data.usage || {} };
+  }
   return { success: true, content, model, latency_ms: elapsed, tokens: data.usage || {} };
 }
 
