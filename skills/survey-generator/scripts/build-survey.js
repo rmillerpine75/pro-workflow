@@ -55,6 +55,9 @@ function postJSON(urlStr, body, headers, timeoutMs = 600000) {
 // timeout (no bytes received), not a cap on total generation time.
 function postAnthropicStream(urlStr, body, headers, idleTimeoutMs = 600000) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = v => { if (!settled) { settled = true; resolve(v); } };
+    const fail = e => { if (!settled) { settled = true; reject(e); } };
     const url = new URL(urlStr);
     const data = JSON.stringify(body);
     const req = https.request({
@@ -64,19 +67,23 @@ function postAnthropicStream(urlStr, body, headers, idleTimeoutMs = 600000) {
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers },
     }, res => {
       res.setEncoding('utf8');
+      // A dropped connection emits 'error'/'close' without 'end'; without this the promise would never
+      // settle and node would exit 0 without writing a survey.
+      res.on('error', fail);
+      res.on('close', () => fail(new Error('survey response closed before end')));
       if (res.statusCode >= 400) {
         let errBody = '';
         res.on('data', c => { errBody += c; });
-        res.on('end', () => resolve({ status: res.statusCode, body: errBody }));
+        res.on('end', () => finish({ status: res.statusCode, body: errBody }));
         return;
       }
       const out = { status: res.statusCode, body: '', text: '', stop_reason: null, usage: {}, error: null };
       let buf = '';
       res.on('data', c => { buf = consumeSSE(buf + c, ev => applyStreamEvent(out, ev)); });
-      res.on('end', () => { consumeSSE(buf + '\n\n', ev => applyStreamEvent(out, ev)); resolve(out); });
+      res.on('end', () => { consumeSSE(buf + '\n\n', ev => applyStreamEvent(out, ev)); finish(out); });
     });
     req.setTimeout(idleTimeoutMs, () => req.destroy(new Error('survey request timeout')));
-    req.on('error', reject);
+    req.on('error', fail);
     req.write(data);
     req.end();
   });
@@ -254,7 +261,7 @@ async function cmdRun(args) {
   if (!wiki) die(`unknown wiki: ${slug}`);
 
   console.error(`[survey] generating with ${providerName}:${model} for wiki ${slug}`);
-  const md = await callProvider(providerName, model, 'You are a careful technical-writing assistant generating a literature survey.', buildPrompt(bundle), 64000);
+  const md = await callProvider(providerName, model, 'You are a careful technical-writing assistant generating a literature survey.', buildPrompt(bundle), providerName === 'anthropic' ? 64000 : 16000);
 
   const surveysDir = path.join(wiki.root_path, 'derived', 'surveys');
   fs.mkdirSync(surveysDir, { recursive: true });
