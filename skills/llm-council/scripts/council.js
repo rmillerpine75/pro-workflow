@@ -113,7 +113,8 @@ async function callAnthropic(provider, model, system, user) {
   let data;
   try { data = JSON.parse(res.body); } catch { return { success: false, content: '[parse-error]', model, latency_ms: elapsed }; }
   const content = (data.content || []).map(b => b.text || '').join('');
-  if (data.stop_reason === 'refusal' || data.stop_reason === 'max_tokens') {
+  // Anything other than end_turn (max_tokens, refusal, model_context_window_exceeded) is incomplete.
+  if (data.stop_reason !== 'end_turn') {
     return { success: false, content: `[stopped: ${data.stop_reason}] ${content}`, model, latency_ms: elapsed, tokens: data.usage || {} };
   }
   return { success: true, content, model, latency_ms: elapsed, tokens: data.usage || {} };
@@ -209,6 +210,7 @@ async function cmdRun(args) {
   const userSynth = `ORIGINAL QUERY:\n${query}\n\nINDIVIDUAL RESPONSES:\n${responsesText}\n\nMODEL RANKINGS:\n${rankingsText}\n\nProduce the FINAL SYNTHESIS:`;
   const synth = await provider.call(provider, chairman, sysSynth, userSynth);
   fs.writeFileSync(path.join(sessionDir, 'phase3_synthesis.txt'), synth.content);
+  fs.writeFileSync(path.join(sessionDir, 'phase3_usage.json'), JSON.stringify({ model: chairman, success: synth.success, latency_ms: synth.latency_ms, tokens: synth.tokens || {} }, null, 2));
   if (!synth.success) {
     // Refusal, max_tokens cutoff or API error on the chairman call: don't present it as a finished synthesis.
     console.error(`chairman synthesis failed: ${synth.content.slice(0, 200)}`);

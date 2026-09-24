@@ -50,6 +50,58 @@ function postJSON(urlStr, body, headers, timeoutMs = 600000) {
   });
 }
 
+// Minimal SSE client for the Messages API stream: collects text deltas and the final stop_reason.
+// Streaming keeps the connection active during long generations; the timeout below is an idle
+// timeout (no bytes received), not a cap on total generation time.
+function postAnthropicStream(urlStr, body, headers, idleTimeoutMs = 600000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
+    const data = JSON.stringify(body);
+    const req = https.request({
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers },
+    }, res => {
+      res.setEncoding('utf8');
+      if (res.statusCode >= 400) {
+        let errBody = '';
+        res.on('data', c => { errBody += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: errBody }));
+        return;
+      }
+      const out = { status: res.statusCode, body: '', text: '', stop_reason: null, usage: {}, error: null };
+      let buf = '';
+      res.on('data', c => { buf = consumeSSE(buf + c, ev => applyStreamEvent(out, ev)); });
+      res.on('end', () => { consumeSSE(buf + '\n\n', ev => applyStreamEvent(out, ev)); resolve(out); });
+    });
+    req.setTimeout(idleTimeoutMs, () => req.destroy(new Error('survey request timeout')));
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+// Parses complete SSE events out of buf, calls onEvent(json) for each, returns the unparsed remainder.
+function consumeSSE(buf, onEvent) {
+  const parts = buf.replace(/\r\n/g, '\n').split('\n\n');
+  const rest = parts.pop();
+  for (const part of parts) {
+    const dataLines = part.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart());
+    if (!dataLines.length) continue;
+    try { onEvent(JSON.parse(dataLines.join('\n'))); } catch { /* skip non-JSON keep-alive lines */ }
+  }
+  return rest;
+}
+
+function applyStreamEvent(out, ev) {
+  if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') out.text += ev.delta.text;
+  else if (ev.type === 'message_delta') {
+    if (ev.delta && ev.delta.stop_reason) out.stop_reason = ev.delta.stop_reason;
+    if (ev.usage) out.usage = ev.usage;
+  } else if (ev.type === 'error') out.error = ev.error || ev;
+}
+
 const PROVIDER_DEFAULTS = {
   anthropic: { envKey: 'ANTHROPIC_API_KEY', baseUrl: 'https://api.anthropic.com', model: 'claude-opus-5-5' },
   openai: { envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
@@ -68,14 +120,17 @@ async function callProvider(providerName, model, system, user, maxTokens) {
   const p = PROVIDER_DEFAULTS[providerName];
   if (!process.env[p.envKey]) die(`${p.envKey} not set`);
   if (providerName === 'anthropic') {
-    const res = await postJSON(`${p.baseUrl}/v1/messages`, {
-      model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }],
+    // Thinking counts toward max_tokens, so the budget covers thinking plus the survey text.
+    const res = await postAnthropicStream(`${p.baseUrl}/v1/messages`, {
+      model, max_tokens: maxTokens, stream: true, system, messages: [{ role: 'user', content: user }],
     }, { 'x-api-key': process.env[p.envKey], 'anthropic-version': '2023-06-01' });
     if (res.status >= 400) die(`anthropic error ${res.status}: ${res.body.slice(0, 300)}`);
-    const data = JSON.parse(res.body);
-    if (data.stop_reason === 'max_tokens') die(`anthropic output hit max_tokens (${maxTokens}); survey would be truncated`);
-    if (data.stop_reason === 'refusal') die('anthropic refused the request');
-    return (data.content || []).map(b => b.text || '').join('');
+    if (res.error) die(`anthropic stream error: ${JSON.stringify(res.error).slice(0, 300)}`);
+    if (res.stop_reason === 'refusal') die('anthropic refused the request');
+    // Only end_turn is a complete survey; max_tokens, model_context_window_exceeded or a dropped
+    // stream (null) would write a truncated file.
+    if (res.stop_reason !== 'end_turn') die(`anthropic stopped with ${res.stop_reason} (max_tokens ${maxTokens}); survey would be truncated`);
+    return res.text;
   }
   const res = await postJSON(`${p.baseUrl}/chat/completions`, {
     model, max_tokens: maxTokens, temperature: 0.7,
@@ -199,7 +254,7 @@ async function cmdRun(args) {
   if (!wiki) die(`unknown wiki: ${slug}`);
 
   console.error(`[survey] generating with ${providerName}:${model} for wiki ${slug}`);
-  const md = await callProvider(providerName, model, 'You are a careful technical-writing assistant generating a literature survey.', buildPrompt(bundle), 16000);
+  const md = await callProvider(providerName, model, 'You are a careful technical-writing assistant generating a literature survey.', buildPrompt(bundle), 64000);
 
   const surveysDir = path.join(wiki.root_path, 'derived', 'surveys');
   fs.mkdirSync(surveysDir, { recursive: true });

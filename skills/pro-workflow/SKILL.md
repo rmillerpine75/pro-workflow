@@ -242,7 +242,7 @@ Fixed thinking budgets are retired on current models. Control depth with `effort
 ## Model Hints
 Route by tier: Haiku for lookups, Sonnet for features, Opus for
 architecture and hard debugging.
-Effort is the lever, not thinking budgets: xhigh for coding, low for subagents.
+Effort is the lever, not thinking budgets: set it by model and task; reserve xhigh for work that needs its additional capability, and use low for subagents.
 ```
 
 ---
